@@ -13,6 +13,7 @@ import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.SafeGuardAdvisor;
 import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -40,12 +41,16 @@ public class AiConfig {
     private static final int RAG_ORDER = 300;
 
     /**
-     * 최근 대화를 정해진 개수만큼 유지하는 메모리다.
+     * 최근 대화를 정해진 개수만큼 유지하고 JDBC 저장소에 영속화하는 메모리다.
      * 최대 메시지 수를 설정 파일에서 읽어 코드 수정 없이 조절할 수 있다.
      */
     @Bean
-    ChatMemory chatMemory(HelpDeskProperties properties) {
+    ChatMemory chatMemory(ChatMemoryRepository repository, HelpDeskProperties properties) {
         return MessageWindowChatMemory.builder()
+                // PostgreSQL 운영 DB와 H2 테스트 DB 모두 같은 Repository 추상화를 사용한다.
+                .chatMemoryRepository(repository)
+                // 전체 대화를 무제한으로 프롬프트에 넣지 않고 최근 메시지만 유지해
+                // 토큰 사용량과 모델 지연시간을 통제한다.
                 .maxMessages(properties.memory().max())
                 .build();
     }

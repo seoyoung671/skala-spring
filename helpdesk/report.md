@@ -114,7 +114,7 @@ EmbeddingModel → PGvector → VectorStore 인터페이스
 
 `MessageWindowChatMemory`를 사용해 최근 대화 메시지를 메모리에 유지하도록 구성했다. 최대 메시지 수는 코드에 고정하지 않고 `helpdesk.memory.max` 설정에서 읽는다.
 
-현재 메모리는 애플리케이션 프로세스 내부에 저장된다. 따라서 서버가 재시작되면 대화 기록이 사라지며, 다중 서버 환경에서는 인스턴스 간 대화 기록이 공유되지 않는다. 영속화 또는 분산 저장소 적용은 후속 확장 대상으로 남긴다.
+Phase 1 당시에는 기본 인메모리 저장소를 사용했으므로 서버 재시작 시 대화 기록이 사라지는 한계가 있었다. 이 한계는 Phase 5에서 JDBC ChatMemoryRepository를 적용해 해결했다.
 
 ### 3.7 Advisor 체인
 
@@ -743,6 +743,163 @@ Tool 설명
 - 주문 상태별 교환·환불 가능 여부 검증
 - Tool 실패를 사용자용 오류 응답으로 변환
 
-## 7. 이후 작성 예정
+## 7. Phase 5 — 메모리와 멀티턴
+
+### 7.1 목표
+
+Phase 5의 목표는 “그 주문”, “그건 반품돼요?”처럼 앞선 대화 없이는 해석할 수 없는 질문을 처리하는 것이다. 대화 기록을 JDBC에 저장해 애플리케이션 재시작 후에도 유지하고, 테넌트·사용자·세션 단위로 대화를 격리한다.
+
+핵심 요구사항은 다음과 같다.
+
+1. 대화 메시지를 JDBC 저장소에 영속화한다.
+2. 최근 메시지만 유지하는 윈도우로 토큰 사용량을 제한한다.
+3. conversationId를 한곳에서 일관된 규칙으로 생성한다.
+4. 사용자와 세션이 다른 대화가 섞이지 않도록 한다.
+5. 3턴 이상의 문맥이 새 메모리 객체에서도 복원되는지 검증한다.
+
+### 7.2 JDBC 대화 저장소
+
+Spring AI JDBC Chat Memory Repository starter를 추가했다.
+
+```text
+MessageWindowChatMemory
+  → ChatMemoryRepository
+  → JDBC
+  → PostgreSQL 운영 DB / H2 테스트 DB
+```
+
+`AiConfig`는 자동 설정이 제공하는 `ChatMemoryRepository`를 `MessageWindowChatMemory`에 연결한다.
+
+```java
+MessageWindowChatMemory.builder()
+    .chatMemoryRepository(repository)
+    .maxMessages(properties.memory().max())
+    .build();
+```
+
+메모리 객체가 새로 만들어져도 같은 DB와 conversationId를 사용하면 이전 메시지를 다시 읽을 수 있다.
+
+### 7.3 스키마 초기화
+
+```properties
+spring.ai.chat.memory.repository.jdbc.initialize-schema=always
+```
+
+운영 환경에서는 PostgreSQL에, 테스트에서는 H2에 Spring AI 대화 메모리 테이블을 준비한다. 애플리케이션 도메인 테이블과 달리 ChatMemoryRepository가 사용하는 스키마는 Spring AI 초기화 기능으로 관리한다.
+
+### 7.4 메시지 윈도우
+
+대화 전체를 계속 모델에 보내면 프롬프트 토큰, 응답 지연과 비용이 지속적으로 증가한다. `helpdesk.memory.max=20` 설정으로 최근 20개 메시지만 활성 문맥으로 유지한다.
+
+```text
+오래된 메시지 ── 윈도우 밖으로 제거
+최근 20개 메시지 ── 다음 프롬프트에 포함
+```
+
+윈도우 크기는 `HelpDeskProperties.Memory`에 바인딩되므로 운영 환경에서 코드 수정 없이 조정할 수 있다.
+
+### 7.5 대화 ID 규칙
+
+`ConversationIdFactory`에서 대화 ID를 다음 형식으로 중앙 생성한다.
+
+```text
+tenantId:userId:sessionId
+```
+
+예시는 다음과 같다.
+
+```text
+skala:user1:browser-a
+```
+
+각 요소의 의미는 다음과 같다.
+
+| 구성요소 | 격리 범위 |
+|---|---|
+| `tenantId` | 회사 또는 조직 |
+| `userId` | 인증 사용자 |
+| `sessionId` | 사용자의 개별 상담 세션 |
+
+호출부마다 문자열을 직접 조합하지 않고 Factory를 사용해 규칙 변경과 검증을 한곳에서 수행한다. 각 구간에는 구분자인 `:`를 허용하지 않아 서로 다른 입력 조합이 같은 conversationId로 충돌하는 것을 막는다.
+
+### 7.6 HelpDeskService 연동
+
+HelpDeskService는 질문과 함께 tenantId, userId, sessionId를 받는다. Factory가 만든 conversationId는 Memory Advisor parameter로 전달하고, userId는 별도로 ToolContext에 전달한다.
+
+```text
+tenantId + userId + sessionId
+  → ConversationIdFactory
+  → ChatMemory.CONVERSATION_ID
+
+userId
+  → ToolContext
+  → 주문·티켓 소유권 검증
+```
+
+메모리 격리 키와 Tool 인증 사용자 정보의 역할을 구분해, 대화 ID 문자열을 권한 검증 수단으로 사용하지 않는다.
+
+### 7.7 3턴 시나리오
+
+테스트에서 다음 대화를 JDBC Repository에 저장했다.
+
+```text
+1턴: “반품 규정이 어떻게 되나요?”
+     → “단순 변심은 수령 후 7일 이내입니다.”
+
+2턴: “내 주문 12345는 지금 어디예요?”
+     → “주문 12345는 배송중입니다.”
+
+3턴: “그럼 그건 반품돼요?”
+     → 앞선 주문과 반품 규정을 함께 참조해야 하는 질문
+```
+
+첫 번째 `MessageWindowChatMemory`에 메시지를 저장한 뒤 새로운 메모리 객체를 생성하고 같은 conversationId로 여섯 메시지가 모두 복원되는지 확인했다. 이는 단순 객체 필드가 아니라 JDBC Repository에 대화가 저장되었음을 검증한다.
+
+### 7.8 검증
+
+다음 내용을 테스트했다.
+
+- tenant, user, session을 정해진 순서로 조합하는지 확인
+- 사용자나 세션이 다르면 conversationId도 다른지 확인
+- 구분자가 포함된 모호한 ID 입력을 거부하는지 확인
+- 새 ChatMemory 객체가 JDBC에서 3턴 대화를 복원하는지 확인
+- 설정한 윈도우 크기를 넘으면 오래된 메시지가 제거되는지 확인
+- 기존 Phase 1~4 테스트가 계속 통과하는지 확인
+
+```text
+./gradlew test
+BUILD SUCCESSFUL
+```
+
+### 7.9 주요 산출물
+
+| 파일 | 역할 |
+|---|---|
+| `chat/ConversationIdFactory.java` | tenant·user·session 대화 ID 중앙 생성 |
+| `config/AiConfig.java` | JDBC Repository 기반 ChatMemory 조립 |
+| `chat/HelpDeskService.java` | 격리된 conversationId를 Advisor에 전달 |
+| `chat/ConversationIdFactoryTests.java` | 대화 ID 격리와 입력 검증 |
+| `chat/ChatMemoryPersistenceTests.java` | JDBC 영속화, 3턴 문맥과 윈도우 검증 |
+
+### 7.10 완료 기준
+
+| 완료 기준 | 결과 |
+|---|---|
+| JDBC ChatMemoryRepository 적용 | 완료 |
+| 재생성 후 대화 복원 | 완료 |
+| 설정 기반 최근 메시지 윈도우 | 완료 |
+| tenant:user:session ID 규칙 | 완료 |
+| 사용자·세션 간 대화 격리 | 완료 |
+| 3턴 문맥 저장·복원 테스트 | 완료 |
+
+### 7.11 제한사항 및 후속 과제
+
+- 실제 OpenAI 모델이 3턴의 대명사를 올바르게 해석하는 E2E 평가
+- 세션 생성·종료와 대화 삭제 API
+- 대화 보존 기간 및 개인정보 삭제 정책
+- 다중 인스턴스 동시 쓰기 충돌 검증
+- 테넌트 ID를 인증 정보에서 안전하게 획득하는 보안 연동
+
+## 8. 이후 작성 예정
 
 이 문서는 Phase별 결과를 별도 파일로 나누지 않고 계속 누적한다. 이후 Phase를 완료할 때마다 목표, 설계, 구현 내용, 검증 결과와 제한사항을 동일한 형식으로 추가한다.

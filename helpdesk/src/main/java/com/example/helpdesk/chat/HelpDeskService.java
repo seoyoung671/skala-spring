@@ -26,29 +26,37 @@ public class HelpDeskService {
     public static final String NO_EVIDENCE_ANSWER = "제공된 문서에서 확인되지 않습니다.";
 
     private final ChatClient chatClient;
+    private final ConversationIdFactory conversationIds;
 
-    public HelpDeskService(@Qualifier("helpDeskClient") ChatClient chatClient) {
+    public HelpDeskService(
+            @Qualifier("helpDeskClient") ChatClient chatClient,
+            ConversationIdFactory conversationIds) {
         this.chatClient = chatClient;
+        this.conversationIds = conversationIds;
     }
 
-    /** 질문을 실행하고 RAG 답변 및 출처를 반환한다. */
-    public AnswerDto ask(String question, String conversationId) {
-        return ask(question, conversationId, "anonymous");
-    }
-
-    /** 인증 사용자 정보를 ToolContext에 전달해 주문과 티켓 Tool이 소유권을 검사하게 한다. */
-    public AnswerDto ask(String question, String conversationId, String userId) {
+    /**
+     * 테넌트·사용자·세션으로 격리한 대화에서 질문을 실행한다.
+     * 인증 사용자 정보는 주문과 티켓 Tool의 소유권 검사에도 전달한다.
+     */
+    public AnswerDto ask(
+            String question,
+            String tenantId,
+            String userId,
+            String sessionId) {
         String normalizedQuestion = required(question, "질문");
-        String normalizedConversationId = required(conversationId, "대화 ID");
         String normalizedUserId = required(userId, "사용자 ID");
+        // 클라이언트가 보낸 단일 대화 ID를 그대로 신뢰하지 않고 서버 규칙으로 만든다.
+        String conversationId = conversationIds.create(tenantId, normalizedUserId, sessionId);
         AtomicBoolean toolExecuted = new AtomicBoolean(false);
 
         ChatClientResponse response = chatClient.prompt()
                 .user(normalizedQuestion)
                 // 같은 conversationId를 사용한 호출은 MessageChatMemoryAdvisor가
-                // 앞선 대화를 찾아 현재 프롬프트에 포함한다.
+                // JDBC Repository에서 앞선 대화를 찾아 현재 프롬프트에 포함하고,
+                // 이번 질문과 응답도 같은 ID로 다시 저장한다.
                 .advisors(advisor -> advisor.param(
-                        ChatMemory.CONVERSATION_ID, normalizedConversationId))
+                        ChatMemory.CONVERSATION_ID, conversationId))
                 // 모델이 만든 orderId만 신뢰하지 않도록 인증 사용자 ID를 Tool에 함께 보낸다.
                 // 실행 표시는 RAG 출처가 없는 정상 Tool 답변을 구분하는 데 사용한다.
                 .toolContext(Map.of(
