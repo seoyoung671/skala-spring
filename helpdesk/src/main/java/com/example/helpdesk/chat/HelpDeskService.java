@@ -1,6 +1,8 @@
 package com.example.helpdesk.chat;
 
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.example.helpdesk.chat.AnswerDto.Source;
 import org.springframework.ai.chat.client.ChatClient;
@@ -31,8 +33,15 @@ public class HelpDeskService {
 
     /** 질문을 실행하고 RAG 답변 및 출처를 반환한다. */
     public AnswerDto ask(String question, String conversationId) {
+        return ask(question, conversationId, "anonymous");
+    }
+
+    /** 인증 사용자 정보를 ToolContext에 전달해 주문과 티켓 Tool이 소유권을 검사하게 한다. */
+    public AnswerDto ask(String question, String conversationId, String userId) {
         String normalizedQuestion = required(question, "질문");
         String normalizedConversationId = required(conversationId, "대화 ID");
+        String normalizedUserId = required(userId, "사용자 ID");
+        AtomicBoolean toolExecuted = new AtomicBoolean(false);
 
         ChatClientResponse response = chatClient.prompt()
                 .user(normalizedQuestion)
@@ -40,11 +49,16 @@ public class HelpDeskService {
                 // 앞선 대화를 찾아 현재 프롬프트에 포함한다.
                 .advisors(advisor -> advisor.param(
                         ChatMemory.CONVERSATION_ID, normalizedConversationId))
+                // 모델이 만든 orderId만 신뢰하지 않도록 인증 사용자 ID를 Tool에 함께 보낸다.
+                // 실행 표시는 RAG 출처가 없는 정상 Tool 답변을 구분하는 데 사용한다.
+                .toolContext(Map.of(
+                        "userId", normalizedUserId,
+                        "toolExecuted", toolExecuted))
                 .call()
                 // content()가 아닌 전체 응답을 받아야 Advisor context를 확인할 수 있다.
                 .chatClientResponse();
 
-        return toAnswer(response);
+        return toAnswer(response, toolExecuted.get());
     }
 
     /**
@@ -52,13 +66,17 @@ public class HelpDeskService {
      * 검색 근거가 하나도 없으면 모델이 어떤 문장을 생성했더라도 안전 응답으로 대체한다.
      */
     AnswerDto toAnswer(ChatClientResponse response) {
+        return toAnswer(response, false);
+    }
+
+    private AnswerDto toAnswer(ChatClientResponse response, boolean toolExecuted) {
         if (response == null) {
             return unknown();
         }
 
         List<Source> sources = extractSources(
                 response.context().get(QuestionAnswerAdvisor.RETRIEVED_DOCUMENTS));
-        if (sources.isEmpty()) {
+        if (sources.isEmpty() && !toolExecuted) {
             // 모델의 사전학습 지식이나 추측이 사용자에게 전달되는 것을 막는 1차 방어선이다.
             return unknown();
         }
@@ -67,6 +85,7 @@ public class HelpDeskService {
         if (!StringUtils.hasText(answer)) {
             return unknown();
         }
+        // Tool 답변은 실시간 DB 결과가 근거이므로 문서 출처가 없어도 정상 응답이다.
         return new AnswerDto(answer, sources);
     }
 

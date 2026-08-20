@@ -6,6 +6,8 @@ import java.util.List;
 
 import com.example.helpdesk.advisor.AuditAdvisor;
 import com.example.helpdesk.advisor.TokenMeterAdvisor;
+import com.example.helpdesk.tools.OrderTools;
+import com.example.helpdesk.tools.TicketTools;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.SafeGuardAdvisor;
@@ -63,6 +65,8 @@ public class AiConfig {
             HelpDeskProperties properties,
             AuditAdvisor auditAdvisor,
             TokenMeterAdvisor tokenMeterAdvisor,
+            OrderTools orderTools,
+            TicketTools ticketTools,
             Resource systemPrompt) throws IOException {
 
         // 민감정보가 포함된 질문은 모델이나 RAG로 전달되기 전에 즉시 차단한다.
@@ -98,6 +102,8 @@ public class AiConfig {
                         memoryAdvisor,
                         questionAnswerAdvisor,
                         tokenMeterAdvisor)
+                // 문서 검색으로 알 수 없는 실시간 주문과 티켓 업무를 모델이 호출한다.
+                .defaultTools(orderTools, ticketTools)
                 .build();
     }
 
