@@ -16,7 +16,7 @@ import org.springframework.validation.annotation.Validated;
  */
 @Validated
 @ConfigurationProperties(prefix = "helpdesk")
-public record HelpDeskProperties(@Valid Rag rag, @Valid Memory memory) {
+public record HelpDeskProperties(@Valid Rag rag, @Valid Memory memory, @Valid Ingest ingest) {
 
     /** RAG 검색 범위와 검색 결과 채택 기준이다. */
     public record Rag(
@@ -28,5 +28,12 @@ public record HelpDeskProperties(@Valid Rag rag, @Valid Memory memory) {
 
     /** 한 대화에서 보존할 최근 메시지 개수다. */
     public record Memory(@Min(1) @Max(100) int max) {
+    }
+
+    /** 문서 분할 크기와 검색 결과 미리보기 길이다. */
+    public record Ingest(
+            @Min(100) @Max(4000) int chunkSize,
+            @Min(50) @Max(2000) int minChunkSizeChars,
+            @Min(40) @Max(1000) int previewLength) {
     }
 }

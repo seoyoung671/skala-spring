@@ -230,6 +230,146 @@ Phase 1은 AI 요청을 처리할 공통 기반을 완성한 단계다. 다음 �
 - Advisor 단위 테스트와 골든 세트 평가
 - 외부 AI 장애 시 폴백 구성
 
-## 4. 이후 작성 예정
+## 4. Phase 2 — 문서 인제스트 파이프라인
+
+### 4.1 목표
+
+Phase 2의 목표는 사내 규정 문서를 검색 가능한 청크로 변환해 PGvector에 저장하고, 저장 결과를 검색 API로 직접 확인할 수 있게 하는 것이다.
+
+핵심 요구사항은 다음과 같다.
+
+1. Tika로 다양한 형식의 문서를 읽는다.
+2. 긴 문서를 토큰 기준 청크로 분할한다.
+3. 모든 청크에 출처 메타데이터를 저장한다.
+4. 같은 문서를 다시 넣을 때 기존 청크를 삭제해 중복을 방지한다.
+5. 검색 결과의 출처, 버전, 점수와 미리보기를 확인한다.
+
+### 4.2 인제스트 처리 흐름
+
+```text
+문서 업로드
+  → TikaDocumentReader로 본문 추출
+  → TokenTextSplitter로 청크 분할
+  → 출처 메타데이터 추가
+  → 동일 source의 기존 청크 삭제
+  → 임베딩 생성 및 PGvector 저장
+```
+
+파싱 실패 시 기존 문서까지 사라지는 상황을 줄이기 위해 문서 읽기와 청크 분할을 먼저 완료한 후 삭제와 저장을 수행한다.
+
+### 4.3 청크 설정 외부화
+
+```properties
+helpdesk.ingest.chunk-size=800
+helpdesk.ingest.min-chunk-size-chars=350
+helpdesk.ingest.preview-length=160
+```
+
+| 설정 | 의미 |
+|---|---|
+| `chunk-size` | TokenTextSplitter가 목표로 하는 청크 크기 |
+| `min-chunk-size-chars` | 지나치게 작은 청크 생성을 방지하는 최소 문자 수 |
+| `preview-length` | 품질 확인 API에서 반환할 본문 미리보기 길이 |
+
+각 값은 `HelpDeskProperties.Ingest`에 바인딩하고 Bean Validation으로 허용 범위를 검증한다.
+
+### 4.4 출처 메타데이터
+
+모든 청크에 다음 메타데이터를 저장한다.
+
+| 메타데이터 | 용도 |
+|---|---|
+| `source` | 원본 파일명 및 재인제스트 삭제 기준 |
+| `title` | 사용자에게 표시할 문서 제목 |
+| `version` | 인제스트 날짜를 이용한 문서 버전 |
+| `docType` | 정책, 매뉴얼 등 문서 종류 |
+| `dept` | 문서 담당 부서 |
+
+`source`, `title`, `version`은 최종 답변의 출처 표시에 필요한 필수 항목이다. `docType`과 `dept`는 이후 검색 범위를 제한하는 필터로 활용할 수 있다.
+
+### 4.5 중복 방지
+
+재인제스트할 때 파일명인 `source`가 같은 기존 청크를 필터로 삭제한 후 새 청크를 추가한다.
+
+```text
+delete(source = 현재 파일명)
+  → add(새 청크 목록)
+```
+
+필터 문자열을 직접 연결하지 않고 `FilterExpressionBuilder`를 사용해 특수문자가 포함된 파일명도 안전하게 처리한다. 이 과정이 없으면 같은 청크가 반복해서 누적되어 검색 결과가 특정 문장으로 편향될 수 있다.
+
+### 4.6 관리자 API
+
+#### 문서 인제스트
+
+```http
+POST /api/admin/documents
+Content-Type: multipart/form-data
+```
+
+요청 값은 문서 파일과 `title`, `docType`, `dept`다. 응답에는 source, title, version과 생성한 청크 수가 포함된다.
+
+#### 검색 품질 확인
+
+```http
+GET /api/admin/chunks?q={검색어}&topK=5
+```
+
+검색 결과는 다음 정보를 반환한다.
+
+- source
+- title
+- version
+- similarity score
+- 본문 preview
+
+품질 확인 API에는 유사도 임계값을 적용하지 않는다. 낮은 점수의 결과도 함께 관찰해야 Phase 1의 RAG threshold를 조정할 근거를 얻을 수 있기 때문이다.
+
+### 4.7 검증
+
+단위 테스트에서 다음 내용을 검증했다.
+
+- 기존 source 삭제가 새 청크 추가보다 먼저 실행되는지 확인
+- 저장되는 모든 청크에 source, title, version, docType, dept가 존재하는지 확인
+- 인제스트 결과의 청크 수가 실제 저장 요청과 일치하는지 확인
+- 검색 품질 확인 응답에 출처와 버전이 포함되는지 확인
+- 긴 본문이 설정한 미리보기 길이로 잘리는지 확인
+
+```text
+./gradlew test
+BUILD SUCCESSFUL
+```
+
+### 4.8 주요 산출물
+
+| 파일 | 역할 |
+|---|---|
+| `rag/IngestService.java` | 문서 읽기, 분할, 메타데이터, 중복 제거와 저장 |
+| `web/AdminController.java` | 문서 업로드 및 검색 품질 확인 API |
+| `config/HelpDeskProperties.java` | 청크와 미리보기 설정 바인딩 |
+| `rag/IngestServiceTests.java` | 인제스트 결과물과 호출 순서 검증 |
+
+### 4.9 완료 기준
+
+| 완료 기준 | 결과 |
+|---|---|
+| Tika 문서 읽기 | 완료 |
+| TokenTextSplitter 청크 분할 | 완료 |
+| 필수 출처 메타데이터 저장 | 완료 |
+| source 단위 삭제 후 재인제스트 | 완료 |
+| 임베딩 및 PGvector 저장 연결 | 완료 |
+| 검색 품질 확인 API | 완료 |
+| 결과물 기반 단위 테스트 | 완료 |
+
+### 4.10 후속 과제
+
+- 실제 사내 규정 문서 준비 및 인제스트
+- PostgreSQL 컨테이너와 OpenAI API를 사용하는 통합 테스트
+- 문서별 명시적 버전 입력 또는 콘텐츠 해시 적용
+- 삭제 성공 후 저장 실패에 대한 복구 전략
+- 관리자 인증·인가 활성화
+- MIME 타입과 업로드 크기 제한
+
+## 5. 이후 작성 예정
 
 이 문서는 Phase별 결과를 별도 파일로 나누지 않고 계속 누적한다. 이후 Phase를 완료할 때마다 목표, 설계, 구현 내용, 검증 결과와 제한사항을 동일한 형식으로 추가한다.
