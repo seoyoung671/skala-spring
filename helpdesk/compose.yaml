@@ -1,0 +1,20 @@
+services:
+  postgres:
+    # PostgreSQL에 pgvector 확장이 포함된 로컬 개발용 이미지다.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: helpdesk
+      POSTGRES_USER: helpdesk
+      POSTGRES_PASSWORD: helpdesk
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helpdesk -d helpdesk"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - helpdesk-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  helpdesk-postgres-data:
