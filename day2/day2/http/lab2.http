@@ -1,0 +1,30 @@
+@host = http://localhost:8080
+
+### 1. 샘플 규정 인제스트
+POST {{host}}/lab2/ingest
+
+### 2. 문서 근거 Q&A
+GET {{host}}/lab2/retrieve?q=반품%20기한&topK=4
+
+### 3. 표현을 바꾼 질문 검색
+GET {{host}}/lab2/retrieve?q=물건%20돌려보내려면%20며칠%20안에%3F&topK=4
+
+### 4. 문서에 없는 질문 검색
+GET {{host}}/lab2/retrieve?q=우주%20배송&topK=4
+
+### 5. 문서 근거 Q&A
+POST {{host}}/lab2/ask
+Content-Type: application/json
+
+{
+  "question": "단순 변심 반품은 며칠 이내에 해야 하나요?",
+  "topK": 5
+}
+
+### 6. 문서에 없는 질문
+POST {{host}}/lab2/ask
+Content-Type: application/json
+
+{
+  "question": "사원 연차는 며칠인가요?"
+}
