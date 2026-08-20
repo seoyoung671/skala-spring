@@ -370,6 +370,137 @@ BUILD SUCCESSFUL
 - 관리자 인증·인가 활성화
 - MIME 타입과 업로드 크기 제한
 
-## 5. 이후 작성 예정
+## 5. Phase 3 — RAG 답변과 출처 표기
+
+### 5.1 목표
+
+Phase 3의 목표는 사용자의 질문을 HelpDesk ChatClient에 전달하고, 생성된 답변과 실제 검색에 사용된 문서 출처를 하나의 구조화된 응답으로 반환하는 것이다.
+
+QuestionAnswerAdvisor는 검색 문서를 모델 프롬프트에 추가하지만 API 응답용 출처 목록까지 자동 생성하지 않는다. 따라서 애플리케이션이 `ChatClientResponse.context()`에서 검색 문서를 꺼내 출처 DTO로 변환해야 한다.
+
+### 5.2 처리 흐름
+
+```text
+사용자 질문 + conversationId
+  → HelpDesk ChatClient 호출
+  → Memory Advisor가 이전 대화 추가
+  → QuestionAnswerAdvisor가 PGvector 검색
+  → 검색 문서를 모델 근거로 추가
+  → 모델 답변 생성
+  → 응답 context에서 실제 검색 문서 추출
+  → AnswerDto(답변, 출처 목록) 반환
+```
+
+### 5.3 대화 식별자 전달
+
+질문과 함께 `conversationId`를 Advisor parameter로 전달한다.
+
+```java
+.advisors(advisor -> advisor.param(
+    ChatMemory.CONVERSATION_ID, conversationId))
+```
+
+`MessageChatMemoryAdvisor`는 이 값을 키로 사용해 같은 대화의 이전 메시지를 불러오고 새로운 질문과 답변을 저장한다. Phase 3에서는 대화 ID 전달 경로를 마련했으며 사용자별 격리는 후속 보안 단계에서 강화한다.
+
+### 5.4 전체 ChatClientResponse 사용
+
+답변 문자열만 반환하는 `content()` 대신 `chatClientResponse()`를 사용한다.
+
+```text
+ChatClientResponse
+├── chatResponse: 모델이 생성한 답변
+└── context: Advisor가 남긴 처리 정보와 검색 문서
+```
+
+검색 문서는 다음 context key에 저장된다.
+
+```java
+QuestionAnswerAdvisor.RETRIEVED_DOCUMENTS
+```
+
+context 값 중 실제 `Document` 객체만 선택하고 source, title, version을 `AnswerDto.Source`로 변환한다.
+
+### 5.5 출처 중복 제거와 검증
+
+한 문서에서 여러 청크가 검색될 수 있으므로 동일한 문서 출처가 응답에 반복될 수 있다. `Source` record의 값 동등성과 `distinct()`를 사용해 같은 source, title, version 조합을 하나로 합친다.
+
+다음 필수 메타데이터가 모두 존재하는 청크만 정상 출처로 인정한다.
+
+- document: 원본 source 파일명
+- title: 사용자 표시용 문서 제목
+- version: 문서 버전
+
+필수 값이 없는 청크는 출처 목록에서 제외한다.
+
+### 5.6 무근거 답변 차단
+
+검색 결과가 없는데 모델 답변을 그대로 반환하면 모델의 사전학습 지식이나 추측이 사내 규정처럼 전달될 수 있다. 이를 막기 위해 유효한 출처가 없으면 모델의 생성 문장을 버리고 고정된 안전 응답을 반환한다.
+
+```text
+제공된 문서에서 확인되지 않습니다.
+```
+
+이때 sources는 빈 목록이다. 모델 응답이 비어 있는 경우에도 같은 안전 응답을 사용한다.
+
+### 5.7 응답 구조
+
+```json
+{
+  "answer": "단순 변심 반품은 수령 후 7일 이내에 신청할 수 있습니다.",
+  "sources": [
+    {
+      "document": "return-policy.md",
+      "title": "반품 규정",
+      "version": "2026-08-20"
+    }
+  ]
+}
+```
+
+답변과 출처를 구조화하면 웹 UI가 출처 링크나 문서 버전을 별도 영역에 표시할 수 있다.
+
+### 5.8 검증
+
+단위 테스트에서 다음 규칙을 검증했다.
+
+- 모델 답변과 실제 검색 출처가 함께 반환되는지 확인
+- 같은 문서의 여러 청크가 하나의 출처로 합쳐지는지 확인
+- 검색 근거가 없으면 모델 문장을 안전 응답으로 교체하는지 확인
+- 필수 메타데이터가 없는 문서를 출처에서 제외하는지 확인
+
+```text
+./gradlew test
+BUILD SUCCESSFUL
+```
+
+### 5.9 주요 산출물
+
+| 파일 | 역할 |
+|---|---|
+| `chat/HelpDeskService.java` | ChatClient 호출, 대화 ID 전달, 답변과 출처 조립 |
+| `chat/AnswerDto.java` | 답변과 문서 출처를 표현하는 구조화 DTO |
+| `chat/HelpDeskServiceTests.java` | 출처 추출, 중복 제거와 무근거 차단 검증 |
+
+### 5.10 완료 기준
+
+| 완료 기준 | 결과 |
+|---|---|
+| HelpDesk ChatClient 질문 호출 | 완료 |
+| conversationId 전달 | 완료 |
+| Advisor context 검색 문서 추출 | 완료 |
+| source, title, version 출처 변환 | 완료 |
+| 중복 출처 제거 | 완료 |
+| 무근거 모델 답변 차단 | 완료 |
+| 결과 변환 단위 테스트 | 완료 |
+
+### 5.11 후속 과제
+
+- 주문 및 티켓 Tool 결과와 RAG 답변의 공존 처리
+- 사용자 ID를 포함한 안전한 conversationId 구성
+- REST 및 SSE API로 AnswerDto 노출
+- 출처 문서 링크와 섹션 정보 확장
+- 실제 PGvector 검색을 포함한 통합 테스트
+
+## 6. 이후 작성 예정
 
 이 문서는 Phase별 결과를 별도 파일로 나누지 않고 계속 누적한다. 이후 Phase를 완료할 때마다 목표, 설계, 구현 내용, 검증 결과와 제한사항을 동일한 형식으로 추가한다.
