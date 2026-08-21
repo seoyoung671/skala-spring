@@ -30,6 +30,8 @@ public class RetrievedDocumentSafetyAdvisor implements CallAdvisor {
 
     @Override
     public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
+        // 이 Advisor는 RAG Advisor보다 뒤에서 실행되므로, RAG가 context에 넣은
+        // '실제로 검색된 문서'를 모델이 읽기 전에 검사할 수 있다.
         Object value = request.context().get(QuestionAnswerAdvisor.RETRIEVED_DOCUMENTS);
         if (value instanceof List<?> values) {
             Document unsafe = values.stream()

@@ -24,8 +24,11 @@ public class ToolCallBudget {
     }
 
     public void consume() {
+        // 호출 횟수를 singleton Bean 필드에 두면 여러 사용자의 요청이 섞인다.
+        // 현재 HttpServletRequest의 attribute에 저장해 요청마다 독립된 예산을 갖게 한다.
         if (!(RequestContextHolder.getRequestAttributes()
                 instanceof ServletRequestAttributes attributes)) {
+            // HTTP 요청 밖에서 수행되는 단위 테스트나 내부 호출에는 요청별 상태가 없으므로 건너뛴다.
             return;
         }
         HttpServletRequest request = attributes.getRequest();

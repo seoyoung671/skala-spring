@@ -91,6 +91,8 @@ public class HelpDeskService {
         String normalizedUserId = required(userId, "사용자 ID");
         String conversationId = conversationIds.create(tenantId, normalizedUserId, sessionId);
         AtomicBoolean toolExecuted = new AtomicBoolean(false);
+        // 스트림은 여러 콜백을 거쳐 비동기적으로 처리되므로 람다 밖의 상태를
+        // 안전하게 갱신할 수 있는 Atomic 타입으로 근거와 Tool 실행 여부를 공유한다.
         AtomicBoolean trustedTokenEmitted = new AtomicBoolean(false);
         AtomicReference<List<Source>> latestSources = new AtomicReference<>(List.of());
 
@@ -121,6 +123,8 @@ public class HelpDeskService {
                     }
                 });
 
+        // defer를 사용해야 스트림 조립 시점이 아니라 모든 token 처리가 끝난 시점의
+        // latestSources/toolExecuted 값을 읽어 마지막 summary 이벤트를 만들 수 있다.
         return tokens.concatWith(Flux.defer(() -> {
             StreamEvent summary = StreamEvent.sources(latestSources.get(), toolExecuted.get());
             if (trustedTokenEmitted.get()) {

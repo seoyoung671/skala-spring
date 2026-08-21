@@ -20,7 +20,10 @@ public class SecurityConfig {
                 // Swagger에서 POST API를 호출할 수 있도록 API 경로만 CSRF 검사에서 제외한다.
                 .csrf(csrf -> csrf.ignoringRequestMatchers("/api/**"))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/swagger-ui/**", "/v3/api-docs/**")
+                        // 정적 화면과 API 문서만 익명 접근을 허용한다. 실제 채팅·관리 API는
+                        // 아래 anyRequest().authenticated()에 의해 Basic 인증이 필요하다.
+                        .requestMatchers("/", "/index.html", "/favicon.ico",
+                                "/swagger-ui/**", "/v3/api-docs/**")
                         .permitAll()
                         .anyRequest()
                         .authenticated())
@@ -30,6 +33,8 @@ public class SecurityConfig {
 
     @Bean
     UserDetailsService userDetailsService() {
+        // 실습 편의를 위한 메모리 계정이다. 운영 환경에서는 {noop} 비밀번호 대신
+        // PasswordEncoder와 DB/외부 인증 서버를 사용해야 한다.
         return new InMemoryUserDetailsManager(
                 User.withUsername("user1")
                         .password("{noop}1234")

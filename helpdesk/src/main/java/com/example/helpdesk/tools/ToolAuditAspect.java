@@ -35,6 +35,8 @@ public class ToolAuditAspect {
 
     @Around("@annotation(org.springframework.ai.tool.annotation.Tool)")
     public Object auditToolCall(ProceedingJoinPoint joinPoint) throws Throwable {
+        // 개별 Tool마다 계측 코드를 반복하지 않고 @Tool 메서드의 공통 경계에서
+        // 호출 제한, 감사 로그, 성공·실패 메트릭을 한 번에 적용한다.
         String toolName = joinPoint.getSignature().getDeclaringType().getSimpleName()
                 + "#" + joinPoint.getSignature().getName();
         String userId = findUserId(joinPoint.getArgs());

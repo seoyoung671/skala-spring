@@ -58,6 +58,8 @@ public class SafetyAdvisor implements CallAdvisor {
                 AuditAdvisor.AUTHENTICATED_USER_ID, "anonymous");
         audit.warn("event=PROMPT_BLOCKED user={} reason={}", userId, reason);
         Map<String, Object> context = new HashMap<>(request.context());
+        // 예외를 던지는 대신 정상 응답 형태를 만들어 반환하면 Controller 계약은 유지하면서
+        // chain.nextCall()을 생략해 이후 Advisor와 실제 모델 호출을 즉시 중단할 수 있다.
         context.put(BLOCKED, true);
         context.put("safety_reason", reason);
         return ChatClientResponse.builder()
