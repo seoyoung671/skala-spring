@@ -3,6 +3,7 @@ package com.example.helpdesk.chat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.example.helpdesk.chat.AnswerDto.Source;
 import org.springframework.ai.chat.client.ChatClient;
@@ -13,6 +14,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+import reactor.core.publisher.Flux;
 
 /**
  * 사용자의 질문을 HelpDesk ChatClient에 전달하고 답변과 실제 검색 출처를 조립한다.
@@ -70,6 +72,57 @@ public class HelpDeskService {
     }
 
     /**
+     * 모델이 생성하는 텍스트를 token 이벤트로 전달하고 마지막에 sources 이벤트를 붙인다.
+     * 검색 문서나 Tool 근거가 확인되지 않은 모델 토큰은 사용자에게 내보내지 않는다.
+     */
+    public Flux<StreamEvent> stream(
+            String question,
+            String tenantId,
+            String userId,
+            String sessionId) {
+        String normalizedQuestion = required(question, "질문");
+        String normalizedUserId = required(userId, "사용자 ID");
+        String conversationId = conversationIds.create(tenantId, normalizedUserId, sessionId);
+        AtomicBoolean toolExecuted = new AtomicBoolean(false);
+        AtomicBoolean trustedTokenEmitted = new AtomicBoolean(false);
+        AtomicReference<List<Source>> latestSources = new AtomicReference<>(List.of());
+
+        Flux<StreamEvent> tokens = chatClient.prompt()
+                .user(normalizedQuestion)
+                .advisors(advisor -> advisor.param(ChatMemory.CONVERSATION_ID, conversationId))
+                .toolContext(Map.of(
+                        "userId", normalizedUserId,
+                        "toolExecuted", toolExecuted))
+                .stream()
+                .chatClientResponse()
+                .handle((response, sink) -> {
+                    List<Source> sources = extractSources(
+                            response.context().get(QuestionAnswerAdvisor.RETRIEVED_DOCUMENTS));
+                    if (!sources.isEmpty()) {
+                        latestSources.set(sources);
+                    }
+
+                    // RAG 문서나 Tool 실행이 확인된 응답만 브라우저에 보낸다.
+                    if (!latestSources.get().isEmpty() || toolExecuted.get()) {
+                        String text = extractAnswer(response);
+                        if (StringUtils.hasText(text)) {
+                            trustedTokenEmitted.set(true);
+                            sink.next(StreamEvent.token(text));
+                        }
+                    }
+                });
+
+        return tokens.concatWith(Flux.defer(() -> {
+            StreamEvent summary = StreamEvent.sources(latestSources.get(), toolExecuted.get());
+            if (trustedTokenEmitted.get()) {
+                return Flux.just(summary);
+            }
+            // 스트리밍에서도 근거 없는 모델 출력을 버리고 동일한 안전 문구를 보낸다.
+            return Flux.just(StreamEvent.token(NO_EVIDENCE_ANSWER), summary);
+        }));
+    }
+
+    /**
      * ChatClientResponse를 외부 API가 사용할 DTO로 바꾼다.
      * 검색 근거가 하나도 없으면 모델이 어떤 문장을 생성했더라도 안전 응답으로 대체한다.
      */
@@ -94,7 +147,7 @@ public class HelpDeskService {
             return unknown();
         }
         // Tool 답변은 실시간 DB 결과가 근거이므로 문서 출처가 없어도 정상 응답이다.
-        return new AnswerDto(answer, sources);
+        return new AnswerDto(answer, sources, toolExecuted);
     }
 
     /** Advisor context의 실제 Document만 출처로 인정하고 중복 문서를 제거한다. */
@@ -144,7 +197,7 @@ public class HelpDeskService {
 
     private AnswerDto unknown() {
         // 클라이언트가 null을 별도로 처리하지 않도록 항상 빈 출처 목록을 제공한다.
-        return new AnswerDto(NO_EVIDENCE_ANSWER, List.of());
+        return new AnswerDto(NO_EVIDENCE_ANSWER, List.of(), false);
     }
 
     private String required(String value, String fieldName) {
