@@ -6,11 +6,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.example.helpdesk.chat.AnswerDto.Source;
+import com.example.helpdesk.advisor.AuditAdvisor;
+import com.example.helpdesk.advisor.SafetyAdvisor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.document.Document;
+import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -29,12 +32,15 @@ public class HelpDeskService {
 
     private final ChatClient chatClient;
     private final ConversationIdFactory conversationIds;
+    private final ChatMemory chatMemory;
 
     public HelpDeskService(
             @Qualifier("helpDeskClient") ChatClient chatClient,
-            ConversationIdFactory conversationIds) {
+            ConversationIdFactory conversationIds,
+            ChatMemory chatMemory) {
         this.chatClient = chatClient;
         this.conversationIds = conversationIds;
+        this.chatMemory = chatMemory;
     }
 
     /**
@@ -57,8 +63,9 @@ public class HelpDeskService {
                 // 같은 conversationId를 사용한 호출은 MessageChatMemoryAdvisor가
                 // JDBC Repository에서 앞선 대화를 찾아 현재 프롬프트에 포함하고,
                 // 이번 질문과 응답도 같은 ID로 다시 저장한다.
-                .advisors(advisor -> advisor.param(
-                        ChatMemory.CONVERSATION_ID, conversationId))
+                .advisors(advisor -> advisor
+                        .param(ChatMemory.CONVERSATION_ID, conversationId)
+                        .param(AuditAdvisor.AUTHENTICATED_USER_ID, normalizedUserId))
                 // 모델이 만든 orderId만 신뢰하지 않도록 인증 사용자 ID를 Tool에 함께 보낸다.
                 // 실행 표시는 RAG 출처가 없는 정상 Tool 답변을 구분하는 데 사용한다.
                 .toolContext(Map.of(
@@ -89,7 +96,9 @@ public class HelpDeskService {
 
         Flux<StreamEvent> tokens = chatClient.prompt()
                 .user(normalizedQuestion)
-                .advisors(advisor -> advisor.param(ChatMemory.CONVERSATION_ID, conversationId))
+                .advisors(advisor -> advisor
+                        .param(ChatMemory.CONVERSATION_ID, conversationId)
+                        .param(AuditAdvisor.AUTHENTICATED_USER_ID, normalizedUserId))
                 .toolContext(Map.of(
                         "userId", normalizedUserId,
                         "toolExecuted", toolExecuted))
@@ -133,6 +142,13 @@ public class HelpDeskService {
     private AnswerDto toAnswer(ChatClientResponse response, boolean toolExecuted) {
         if (response == null) {
             return unknown();
+        }
+
+        if (Boolean.TRUE.equals(response.context().get(SafetyAdvisor.BLOCKED))) {
+            String blockedAnswer = extractAnswer(response);
+            return new AnswerDto(
+                    StringUtils.hasText(blockedAnswer) ? blockedAnswer : NO_EVIDENCE_ANSWER,
+                    List.of(), false);
         }
 
         List<Source> sources = extractSources(
@@ -198,6 +214,22 @@ public class HelpDeskService {
     private AnswerDto unknown() {
         // 클라이언트가 null을 별도로 처리하지 않도록 항상 빈 출처 목록을 제공한다.
         return new AnswerDto(NO_EVIDENCE_ANSWER, List.of(), false);
+    }
+
+    /** 인증 사용자와 세션으로 격리된 대화 기록을 조회한다. */
+    public List<HistoryMessage> history(String tenantId, String userId, String sessionId) {
+        String conversationId = conversationIds.create(
+                tenantId, required(userId, "사용자 ID"), sessionId);
+        return chatMemory.get(conversationId).stream()
+                .map(this::toHistoryMessage)
+                .toList();
+    }
+
+    private HistoryMessage toHistoryMessage(Message message) {
+        return new HistoryMessage(message.getMessageType().name(), message.getText());
+    }
+
+    public record HistoryMessage(String role, String content) {
     }
 
     private String required(String value, String fieldName) {

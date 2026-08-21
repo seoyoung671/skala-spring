@@ -13,11 +13,14 @@ import jakarta.validation.constraints.Size;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
+import java.util.List;
 
 /** 구조화된 REST 응답과 SSE 스트리밍을 제공하는 채팅 API다. */
 @RestController
@@ -64,6 +67,17 @@ public class ChatController {
                         request.question(), tenantId, principal.getName(), request.sessionId())
                 .map(this::toServerSentEvent)
                 .timeout(STREAM_TIMEOUT);
+    }
+
+    /** 현재 인증 사용자의 특정 세션에 저장된 대화 기록을 반환한다. */
+    @GetMapping("/history")
+    public List<HelpDeskService.HistoryMessage> history(
+            @RequestParam
+            @NotBlank @Size(max = 100)
+            @Pattern(regexp = "[A-Za-z0-9_-]+") String sessionId,
+            @RequestHeader(name = "X-Tenant-Id", defaultValue = "skala") String tenantId,
+            Principal principal) {
+        return service.history(tenantId, principal.getName(), sessionId);
     }
 
     private ServerSentEvent<Object> toServerSentEvent(StreamEvent event) {

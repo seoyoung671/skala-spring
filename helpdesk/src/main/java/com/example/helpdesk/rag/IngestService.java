@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.example.helpdesk.config.HelpDeskProperties;
+import com.example.helpdesk.security.PromptInjectionDetector;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.reader.tika.TikaDocumentReader;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
@@ -26,10 +27,15 @@ public class IngestService {
 
     private final VectorStore vectorStore;
     private final HelpDeskProperties properties;
+    private final PromptInjectionDetector injectionDetector;
 
-    public IngestService(VectorStore vectorStore, HelpDeskProperties properties) {
+    public IngestService(
+            VectorStore vectorStore,
+            HelpDeskProperties properties,
+            PromptInjectionDetector injectionDetector) {
         this.vectorStore = vectorStore;
         this.properties = properties;
+        this.injectionDetector = injectionDetector;
     }
 
     public record IngestResult(String source, String title, String version, int chunks) {
@@ -64,6 +70,10 @@ public class IngestService {
         // 삭제 전에 문서를 먼저 읽어 파싱이 실패했는데 기존 문서까지 사라지는
         // 상황을 줄인다.
         List<Document> raw = new TikaDocumentReader(file).get();
+        if (raw.stream().anyMatch(document -> injectionDetector.containsInjection(document.getText()))) {
+            throw new IllegalArgumentException(
+                    "정책 문서에서 프롬프트 인젝션 패턴을 발견했습니다: " + source);
+        }
 
         // 2. 분할: 문서 전체를 모델에 보내지 않고 검색 가능한 작은 청크로 나눈다.
         // 구분자를 유지하면 제목이나 문단 경계가 청크에 남아 검색 품질에 도움이 된다.

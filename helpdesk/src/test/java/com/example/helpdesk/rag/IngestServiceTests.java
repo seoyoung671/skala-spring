@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.example.helpdesk.config.HelpDeskProperties;
+import com.example.helpdesk.security.PromptInjectionDetector;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -33,7 +34,8 @@ class IngestServiceTests {
                 new HelpDeskProperties.Memory(20),
                 // 짧은 테스트 문서도 청크로 만들어지도록 테스트용 최소값을 사용한다.
                 new HelpDeskProperties.Ingest(100, 50, 20));
-        ingestService = new IngestService(vectorStore, properties);
+        ingestService = new IngestService(
+                vectorStore, properties, new PromptInjectionDetector());
     }
 
     @Test

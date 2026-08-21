@@ -2,21 +2,21 @@ package com.example.helpdesk.config;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
-
 import com.example.helpdesk.advisor.AuditAdvisor;
+import com.example.helpdesk.advisor.RetrievedDocumentSafetyAdvisor;
+import com.example.helpdesk.advisor.SafetyAdvisor;
 import com.example.helpdesk.advisor.TokenMeterAdvisor;
 import com.example.helpdesk.tools.OrderTools;
 import com.example.helpdesk.tools.TicketTools;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
-import org.springframework.ai.chat.client.advisor.SafeGuardAdvisor;
 import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -36,7 +36,6 @@ public class AiConfig {
 
     // Advisor의 숫자가 작을수록 요청을 더 바깥쪽에서 먼저 감싼다.
     // 감사 → 안전 → 메모리 → RAG → 계측 순서를 명시적으로 유지한다.
-    private static final int SAFETY_ORDER = 100;
     private static final int MEMORY_ORDER = 200;
     private static final int RAG_ORDER = 300;
 
@@ -69,18 +68,12 @@ public class AiConfig {
             ChatMemory chatMemory,
             HelpDeskProperties properties,
             AuditAdvisor auditAdvisor,
+            SafetyAdvisor safetyAdvisor,
+            RetrievedDocumentSafetyAdvisor retrievedDocumentSafetyAdvisor,
             TokenMeterAdvisor tokenMeterAdvisor,
             OrderTools orderTools,
             TicketTools ticketTools,
             Resource systemPrompt) throws IOException {
-
-        // 민감정보가 포함된 질문은 모델이나 RAG로 전달되기 전에 즉시 차단한다.
-        // 현재는 키워드 기반의 1차 방어이며 정규식 탐지는 후속 Phase에서 확장한다.
-        SafeGuardAdvisor safetyAdvisor = SafeGuardAdvisor.builder()
-                .sensitiveWords(List.of("주민등록번호", "카드번호"))
-                .failureResponse("민감정보가 포함된 요청은 처리할 수 없습니다. 해당 정보를 제거해 주세요.")
-                .order(SAFETY_ORDER)
-                .build();
 
         // conversationId에 연결된 이전 메시지를 현재 프롬프트에 추가하고
         // 이번 사용자 질문과 모델 응답을 다시 메모리에 저장한다.
@@ -90,11 +83,22 @@ public class AiConfig {
 
         // 질문과 유사한 정책 청크를 검색해 모델의 근거 컨텍스트로 제공한다.
         // 검색 개수와 임계값은 운영 중 조정할 수 있도록 외부 설정에서 읽는다.
+        PromptTemplate ragPrompt = new PromptTemplate("""
+                {query}
+
+                [정책 근거]
+                {question_answer_context}
+
+                규정에 관한 답은 위 정책 근거만 사용하세요.
+                개인 주문 조회와 교환·환불 접수는 제공된 도구를 사용하세요.
+                정책 근거에 없는 내용은 추측하지 말고 확인할 수 없다고 답하세요.
+                """);
         QuestionAnswerAdvisor questionAnswerAdvisor = QuestionAnswerAdvisor.builder(vectorStore)
                 .searchRequest(SearchRequest.builder()
                         .topK(properties.rag().topK())
                         .similarityThreshold(properties.rag().threshold())
                         .build())
+                .promptTemplate(ragPrompt)
                 .order(RAG_ORDER)
                 .build();
 
@@ -106,6 +110,7 @@ public class AiConfig {
                         safetyAdvisor,
                         memoryAdvisor,
                         questionAnswerAdvisor,
+                        retrievedDocumentSafetyAdvisor,
                         tokenMeterAdvisor)
                 // 문서 검색으로 알 수 없는 실시간 주문과 티켓 업무를 모델이 호출한다.
                 .defaultTools(orderTools, ticketTools)

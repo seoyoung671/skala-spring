@@ -2,20 +2,13 @@ package com.example.helpdesk.eval;
 
 import java.util.List;
 
-/**
- * Phase 1~6을 함께 확인하기 위한 대표 상담 시나리오 모음이다.
- *
- * <p>골든 세트는 모델의 실제 문장을 완전히 고정하지 않는다. 대신 어떤 근거를 사용해야
- * 하는지, Tool 호출이 필요한지, 응답에 반드시 포함되어야 할 핵심 신호가 무엇인지를
- * 기록한다. 이후 실제 모델 E2E 평가에서도 같은 시나리오를 재사용할 수 있다.</p>
- */
-public final class GoldenSet {
+/** 테스트에서만 사용하는 대표 상담 시나리오 모음이다. */
+final class GoldenSet {
 
     private GoldenSet() {
     }
 
-    /** 다섯 검증 흐름을 기능 이름으로 구분한다. */
-    public enum Flow {
+    enum Flow {
         RAG,
         MEMORY_AND_TOOL,
         APPROVAL_GATE,
@@ -23,22 +16,17 @@ public final class GoldenSet {
         FALLBACK
     }
 
-    /** 한 상담 안에서 순서대로 전달할 사용자 발화다. */
-    public record Turn(String message) {
+    record Turn(String message) {
     }
 
-    /**
-     * 기대 결과는 표현이 조금 달라도 검증할 수 있도록 의미 단위로 기록한다.
-     * expectedFragments는 답변에 반드시 나타나야 할 핵심 문구다.
-     */
-    public record Expectation(
+    record Expectation(
             boolean sourceRequired,
             boolean toolRequired,
             boolean pendingApprovalRequired,
             List<String> expectedFragments) {
     }
 
-    public record Scenario(
+    record Scenario(
             String id,
             Flow flow,
             String userId,
@@ -47,11 +35,7 @@ public final class GoldenSet {
             Expectation expectation) {
     }
 
-    /**
-     * 슬라이드의 규정·후속·행동 흐름에 안전과 폴백을 더한 다섯 대표 시나리오다.
-     * 사용자와 세션을 명시해 Memory 격리와 주문 소유권 검증 조건도 함께 남긴다.
-     */
-    public static List<Scenario> scenarios() {
+    static List<Scenario> scenarios() {
         return List.of(
                 new Scenario(
                         "policy-with-citation",

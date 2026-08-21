@@ -9,6 +9,7 @@ import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -23,7 +24,8 @@ class HelpDeskServiceTests {
     @BeforeEach
     void setUp() {
         // 이 테스트는 모델 호출이 아니라 응답과 출처 조립 규칙만 검증한다.
-        service = new HelpDeskService(mock(ChatClient.class), new ConversationIdFactory());
+        service = new HelpDeskService(
+                mock(ChatClient.class), new ConversationIdFactory(), mock(ChatMemory.class));
     }
 
     @Test
